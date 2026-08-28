@@ -20,6 +20,7 @@
     "morgan": "~1.9.1",
     "multer": "^2.2.0",
     "openai": "^7.5.0",
-    "pdf-img-convert": "^2.0.0"
+    "pdf-img-convert": "^2.0.0",
+    "pdf-poppler": "^0.2.3"
   }
 }

@@ -9,7 +9,7 @@ const verifyLogin = require("../middlewares/verifyLogin.js");
 const PastPaper = require("../models/PastPaper.js");
 const User = require('../models/User');
 const Workspace = require("../models/Workspace");
-const pdf2img = require("pdf-img-convert");
+const pdfPoppler = require("pdf-poppler");
 
 const router = express.Router();
 
@@ -95,19 +95,15 @@ router.post("/process", verifyLogin, upload.single("file"), async (req, res, nex
 
     const pagesDir = path.join(userUploadDir, "pages");
 
-    
-    console.log("in /process : starting PDF to Image conversion...");
-    
-    // Convert PDF to an array of image buffers (width 1200 ensures clear text for OpenAI)
-    const imageBuffers = await pdf2img.convert(req.file.path, { width: 1200 });
+    const options = {
+      format: "jpeg",
+      out_dir: pagesDir,
+      out_prefix: "page",
+      page: null
+    };
 
-    // Loop through the buffers and write them to the pagesDir as .jpg files
-    // This allows the rest of your code to work exactly as it did before!
-    for (let i = 0; i < imageBuffers.length; i++) {
-      const imagePath = path.join(pagesDir, `page-${i + 1}.jpg`);
-      await fs.writeFile(imagePath, imageBuffers[i]);
-    }
-    
+    console.log("in /process : starting PDF to Image conversion...");
+    await pdfPoppler.convert(req.file.path, options);
     console.log("in /process : PDF conversion complete");
 
     // Read and filter all JPG/JPEG files
