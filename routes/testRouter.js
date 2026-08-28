@@ -13,7 +13,7 @@ const verifyLogin = require("../middlewares/verifyLogin.js");
 const PastPaper = require("../models/PastPaper.js");
 const User = require('../models/User');
 const Workspace = require("../models/Workspace");
-const pdfPoppler = require("pdf-poppler");
+// const pdfPoppler = require("pdf-poppler");
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
