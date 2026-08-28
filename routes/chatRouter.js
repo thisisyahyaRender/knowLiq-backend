@@ -319,7 +319,7 @@ ${longTermContext}
 
       const currentDateISO = new Date().toISOString();
 
-      const metaCounselorResponse = await openai.chat.completions.create({
+     const metaCounselorResponse = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
           {
@@ -335,23 +335,19 @@ ${currentDateISO}
 - "importance_score" & "total_marks": Exam weight and frequency in past papers.
 - "subtopics.name": Specific subtopic title.
 - "subtopics.historical_score": Fluency score (0.00 to 1.00).
-- "subtopics.retention": Latest test grade:
-  * 'red': Weak recall / needs urgent review.
-  * 'yellow': Moderate recall / review soon.
-  * 'green': Strong recall / well-retained.
-  * 'untested': Brand new concept (never tested).
+- "subtopics.retention": Latest test grade ('red' = weak, 'yellow' = moderate, 'green' = strong, 'untested' = brand new).
 - "subtopics.last_learned_at": UTC ISO timestamp of the last time this subtopic was taught.
 
 ### INSTRUCTIONS:
-1. ACCURATE PROGRESS REPORTING: Use "historical_score" and "retention" to identify weak spots and strengths.
-2. TIME-BASED INQUIRIES: Compare "last_learned_at" against TODAY'S DATE to accurately answer questions like "what did I learn 5 days ago?" or "when did I last review X?".
-3. STRICT OFF-TOPIC / VAGUE FALLBACK: If the student's question is unintelligible, ambiguous, or completely unrelated to their syllabus/progress, DO NOT invent an answer. Reply strictly with:
+1. PROGRESS & WEAKNESSES: General questions like "What should I study?", "How am I doing?", or "What is my weakest area?" ARE valid. Use "historical_score" and "retention" to give them a specific, data-driven answer.
+2. TIME-BASED INQUIRIES: Compare "last_learned_at" against TODAY'S DATE to accurately answer questions like "what did I learn 5 days ago?".
+3. OFF-TOPIC FALLBACK: ONLY if the user's query is completely unrelated to studying (e.g., sports, movies) or pure gibberish, reply strictly with:
 "Please stay focused on the topic. Let me know which concept from your syllabus you'd like to learn or review today."
 4. TONE: Concise, encouraging, and clear (max 2-3 short paragraphs). Match language (English, Urdu, or Roman Urdu).`
           },
           {
             role: "user",
-            content: `Full Syllabus:\n${JSON.stringify(workspace.detailedTopics, null, 2)}\n\nStudent Inquiry:\n${query.trim()}`
+            content: `Full Syllabus Data:\n${JSON.stringify(workspace.detailedTopics, null, 2)}\n\nStudent Inquiry:\n${query.trim()}`
           }
         ]
       });
