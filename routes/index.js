@@ -9,8 +9,8 @@ const verifyLogin = require("../middlewares/verifyLogin.js");
 const PastPaper = require("../models/PastPaper.js");
 const User = require('../models/User');
 const Workspace = require("../models/Workspace");
-const pdfPoppler = require("pdf-poppler");
 
+const { pdf } = require("pdf-to-img");
 const router = express.Router();
 
 const openai = new OpenAI({
@@ -95,17 +95,21 @@ router.post("/process", verifyLogin, upload.single("file"), async (req, res, nex
 
     const pagesDir = path.join(userUploadDir, "pages");
 
-    const options = {
-      format: "jpeg",
-      out_dir: pagesDir,
-      out_prefix: "page",
-      page: null
-    };
-
+    
     console.log("in /process : starting PDF to Image conversion...");
-    await pdfPoppler.convert(req.file.path, options);
-    console.log("in /process : PDF conversion complete");
 
+    // Convert PDF document
+    const document = await pdf(req.file.path, { scale: 2 });
+    let pageIndex = 1;
+
+    for await (const page of document) {
+      const imagePath = path.join(pagesDir, `page-${pageIndex}.jpg`);
+      await fs.writeFile(imagePath, page);
+      pageIndex++;
+    }
+
+    console.log("in /process : PDF conversion complete");
+    
     // Read and filter all JPG/JPEG files
     const allFiles = await fs.readdir(pagesDir);
     const imageFiles = allFiles
