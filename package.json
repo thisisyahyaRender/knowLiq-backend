@@ -1,0 +1,25 @@
+{
+  "name": "backend",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node ./bin/www"
+  },
+  "dependencies": {
+    "cookie-parser": "~1.4.4",
+    "cors": "^2.8.6",
+    "debug": "~2.6.9",
+    "dotenv": "^17.4.2",
+    "ejs": "~2.6.1",
+    "express": "~4.16.1",
+    "firebase-admin": "^14.2.0",
+    "fs-extra": "^11.4.0",
+    "http-errors": "~1.6.3",
+    "mongodb": "^7.5.0",
+    "mongoose": "^9.9.3",
+    "morgan": "~1.9.1",
+    "multer": "^2.2.0",
+    "openai": "^7.5.0",
+    "pdf-poppler": "^0.2.3"
+  }
+}
