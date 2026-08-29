@@ -355,4 +355,33 @@ router.get("/fetch-workspaces", verifyLogin, async function (req, res) {
   }
 });
 
+
+
+
+router.get("/:subject", verifyLogin, async (req, res) => {
+  try {
+    // 1. Find the MongoDB User record by Firebase UID or use req.user._id (if verifyLogin sets it)
+    const uid = req.user;
+    const user = await User.findOne({ firebaseUid: uid }); // or req.user._id if already on req.user
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    // 2. Query workspace with the actual MongoDB ObjectId
+    const workspace = await Workspace.findOne({
+      owner: user._id,
+      subject: req.params.subject
+    });
+
+    if (!workspace) {
+      return res.status(404).json({ success: false, message: "Workspace not found" });
+    }
+
+    res.json({ success: true, workspace });
+  } catch (error) {
+    console.error("Fetch workspace error:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 module.exports = router;
