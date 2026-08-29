@@ -55,6 +55,7 @@ const workspaceSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+      shared : {type : Boolean, default : false},
   topicsToCover: [{
     type: String
   }],

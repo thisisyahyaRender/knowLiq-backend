@@ -13,7 +13,7 @@ const chatSchema = new mongoose.Schema(
       required: true, 
       index: true,
     },
-    
+
     query: {
       type: String,
       required: true,

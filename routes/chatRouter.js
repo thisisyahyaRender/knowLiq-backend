@@ -691,5 +691,106 @@ router.get("/fetch-chat", verifyLogin, async (req, res) => {
   }
 });
 
+//for fetchign shared chat
+router.get("/shared/:shared_workspace_id", async (req, res) => {
+  try {
+    const { shared_workspace_id } = req.params;
+
+    if (!shared_workspace_id) {
+      return res.status(400).json({ success: false, error: "Workspace ID is required" });
+    }
+
+    // 1. Find the workspace to get the associated owner and subject
+ const workspace = await Workspace.findOne({ 
+  _id: shared_workspace_id, 
+  shared: true 
+});
+
+    if (!workspace) {
+      return res.status(404).json({ success: false, error: "Shared workspace not found" });
+    }
+
+    // 2. Extract the owner (user reference) and subject from the workspace
+    const { owner, subject } = workspace;
+
+    // 3. Find chats using the workspace's owner ID and subject
+    const chats = await Chat.find({ 
+      user: owner, 
+      subject: subject 
+    }).sort({ createdAt: 1 });
+
+    return res.status(200).json({ 
+      success: true, 
+      message: "Shared chats retrieved successfully",
+      data: chats 
+    });
+
+  } catch (error) {
+    console.error("error in /shared/:shared_workspace_id:", error.message);
+    
+    // Handle cases where the shared_workspace_id is not a valid MongoDB ObjectId format
+    if (error.name === "CastError") {
+      return res.status(400).json({ 
+        success: false, 
+        error: "Invalid workspace ID format" 
+      });
+    }
+
+    return res.status(500).json({ 
+      success: false, 
+      error: "Something went wrong!" 
+    });
+  }
+});
+
+
+// Assuming you are sending the workspace 'subject' in the request body 
+// so the backend knows *which* workspace to share.
+
+router.post("/create_workspace_shared", verifyLogin, async (req, res) => {
+  try {
+    const { uid } = req;
+    const { subject } = req.body; // Needs the subject to identify the specific workspace
+
+    if (!subject) {
+      return res.status(400).json({ success: false, error: "Subject is required" });
+    }
+
+    // 1. Find the user based on uid from the verifyLogin middleware
+    const user = await User.findOne({ uid });
+
+    if (!user) {
+      return res.status(400).json({ success: false, error: "User does not exist" });
+    }
+
+    // 2. Find the workspace by owner (user._id) and subject, then update/add the 'shared' field
+    // $set will add the field if it doesn't exist, or update it if it does.
+    // { new: true } ensures Mongoose returns the updated document.
+    const workspace = await Workspace.findOneAndUpdate(
+      { owner: user._id, subject: subject },
+      { $set: { shared: true } },
+      { new: true } 
+    );
+
+    if (!workspace) {
+      return res.status(404).json({ success: false, error: "Workspace not found" });
+    }
+
+    // 3. Return the workspace._id as requested
+    return res.status(200).json({ 
+      success: true, 
+      message: "Workspace shared successfully",
+      shared_workspace_id: workspace._id 
+    });
+
+  } catch (error) {
+    console.error("error in /create_workspace_shared:", error.message);
+    return res.status(500).json({ 
+      success: false, 
+      error: "Something went wrong!" 
+    });
+  }
+});
+
 
 module.exports = router;
