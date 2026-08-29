@@ -8,6 +8,7 @@ const verifyLogin = require("../middlewares/verifyLogin.js");
 // Use Capitalized name for Mongoose models by convention
 const PastPaper = require("../models/PastPaper.js");
 const User = require('../models/User');
+const Chat = require("../models/Chat");
 const Workspace = require("../models/Workspace");
 
 const { pdf } = require("pdf-to-img");
@@ -361,8 +362,8 @@ router.get("/fetch-workspaces", verifyLogin, async function (req, res) {
 router.get("/:subject", verifyLogin, async (req, res) => {
   try {
     // 1. Find the MongoDB User record by Firebase UID or use req.user._id (if verifyLogin sets it)
-    const uid = req.user;
-    const user = await User.findOne({ firebaseUid: uid }); // or req.user._id if already on req.user
+    const {uid} = req;
+    const user = await User.findOne({  uid }); // or req.user._id if already on req.user
     if (!user) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
@@ -380,6 +381,48 @@ router.get("/:subject", verifyLogin, async (req, res) => {
     res.json({ success: true, workspace });
   } catch (error) {
     console.error("Fetch workspace error:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+
+router.delete("/delete-workspace/:subject", verifyLogin, async (req, res) => {
+  try {
+    const { uid } = req; 
+    const subject = req.params.subject; 
+
+    // 1. Find the User
+    const user = await User.findOne({ uid }); 
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    // 2. Delete the Workspace document
+    const deletedWorkspace = await Workspace.findOneAndDelete({
+      owner: user._id,
+      subject: subject
+    });
+
+    if (!deletedWorkspace) {
+      return res.status(404).json({ success: false, message: "Workspace not found" });
+    }
+
+    // 3. Delete all associated Chats
+    await Chat.deleteMany({
+      user: user._id,
+      subject: subject
+    });
+
+    // 👉 4. NEW: Remove the workspace from the User's workspaces array
+    await User.updateOne(
+      { _id: user._id },
+      { $pull: { workspaces: subject } } // $pull removes all matching strings from the array
+    );
+
+    res.json({ success: true, message: "Workspace, chats, and user reference deleted successfully" });
+  } catch (error) {
+    console.error("Delete workspace error:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
