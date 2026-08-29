@@ -47,18 +47,17 @@ router.post("/chat", verifyLogin, async (req, res) => {
     const { uid } = req;
     const { selectedModel, subject, query } = req.body;
 
-    // Normalize incoming current-topics from session/frontend
-    let currentTopics = req.body["current-topics"] || req.body.currentTopics || [];
-    if (typeof currentTopics === "string") {
-      try {
-        currentTopics = JSON.parse(currentTopics);
-      } catch (e) {
-        currentTopics = [];
-      }
-    }
+    // // Normalize incoming current-topics from session/frontend
+    // let currentTopics = req.body["current-topics"] || req.body.currentTopics || [];
+    // if (typeof currentTopics === "string") {
+    //   try {
+    //     currentTopics = JSON.parse(currentTopics);
+    //   } catch (e) {
+    //     currentTopics = [];
+    //   }
+    // }
     
-    // Log the received topics
-    console.log(`in /chat : Received current-topics from frontend:`, JSON.stringify(currentTopics));
+
 
     // 1. Model mapping dictionary
     const MODEL_MAPPING = {
@@ -92,7 +91,7 @@ router.post("/chat", verifyLogin, async (req, res) => {
     if (user.chatLock) {
       return res.status(403).json({
         success: "false",
-        error: "Take test now, till then, the chat is freezed.",
+        error: "**Take test now, till then, the chat is freezed.**",
         chat_locked: true
       });
     }
@@ -102,6 +101,11 @@ router.post("/chat", verifyLogin, async (req, res) => {
     if (!workspace) return res.status(404).json({ success: "false", error: "Workspace not found." });
 
     const topicNamesList = workspace.detailedTopics.map(t => t.topic).join(", ");
+
+  let currentTopics = user.currentTopics || [];
+
+      // Log the received topics
+    console.log(`in /chat : Received current-topics from memory :`, JSON.stringify(currentTopics));
 
     // 5. FIRST-TIME SESSION CHECK: Pick initial subtopics using gpt-4o-mini
     if (!Array.isArray(currentTopics) || currentTopics.length === 0) {
@@ -180,10 +184,11 @@ Return only 2 or 3 exact subtopic names.`
       const pickerData = JSON.parse(topicPickerResponse.choices[0].message.content);
       console.log("in /chat : Topics selected:", pickerData.selected_subtopics, "| Rationale:", pickerData.selection_rationale);
 
-      currentTopics = pickerData.selected_subtopics.map(name => ({
-        name: name,
-        counter: 0
-      }));
+      // To this:
+currentTopics = pickerData.selected_subtopics.map(name => ({
+  topic: name, // ✅ CORRECT (Matches your Mongoose schema)
+  counter: 0
+}));
     }
 
     // 6. Generate Embedding for User Query
@@ -224,12 +229,15 @@ Return only 2 or 3 exact subtopic names.`
       : "No highly relevant past conversations found.";
 
     // 8. Prepare Active State String
-    const activeSessionTopicsString = currentTopics
-      .map(t => `${t.name} (Turns spent: ${t.counter})`)
-      .join(", ");
+    // When preparing prompt string:
+const activeSessionTopicsString = currentTopics
+  .map(t => `${t.topic} (Turns spent: ${t.counter})`)
+  .join(", ");
 
-    // 9. Construct Strict System Prompt
-    const systemPrompt = `You are an elite, interactive AI tutor. Your directive is to keep the student perfectly focused using bite-sized learning and active recall.
+   
+    
+
+const systemPrompt = `You are an elite, interactive AI tutor. Your directive is to keep the student perfectly focused using bite-sized learning and active recall.
 
 ### CURRENT SESSION CONTEXT
 You are currently focusing ONLY on these subtopics with the user:
@@ -240,13 +248,13 @@ ${longTermContext}
 
 ### CORE TUTORING RULES:
 1. NO INFO-DUMPING: Never explain everything at once. Focus on ONLY ONE concept at a time. Keep explanations concise and easy to digest.
-2. INTERACTIVE LOOP: After explaining a concept, STOP. Always end your response by asking a question to gauge understanding, or asking if they want to move on.
+2. QUESTIONING & TRANSITIONS: Do NOT ask obvious, trivial, or forced questions. Only ask a question if the concept is complex and genuinely requires active recall. Always end your response with a clear guiding statement to smoothly transition the user to the next logical subtopic from your CURRENT SESSION CONTEXT list.
 3. ADAPTABILITY: If they are confused, re-explain simply. If they master it, transition to the next logical concept.
-4. FORMATTING: Use standard LaTeX for math ($$ for display, $ for inline). Keep general text formatting light. By default, keep your responses slightly formatted in headings and subheadings, also if there is detailed response or multiple concepts explained , must fomrate them in Table in the end
+4. FORMATTING: Use standard LaTeX for math ($$ for display, $ for inline). Keep general text formatting light. Use headings and subheadings. If a response contains multiple concepts or detailed comparisons, you must summarize them in a Markdown Table at the end.
 5. LANGUAGE: Match the user's language. If they use Urdu or Roman Urdu, reply in that language. Do not use Hindi.
 
 ### ROUTING & FLAG RULES:
-- test_pending: If the user has spent ~6 turns on a topic (see Turns spent above), suggest a test. If they explicitly agree to take the test, set "test_pending": true.
+- test_pending: Look at the "Turns spent" in the CURRENT SESSION CONTEXT. If ANY topic has reached 7 or more turns, you MUST immediately set "test_pending": true. DO NOT ask the user if they want to take a test. DO NOT wait for their permission or agreement. Enforce the test automatically.
 - requires_global_context: If the user asks a meta-question about their overall progress, syllabus status, or historical review dates, set "requires_global_context": true.
 - OFF-TOPIC HANDLING: If the user asks something entirely unrelated to the syllabus, set "tutor_response" to gently guide them back using this list of available topics: ${topicNamesList}.`;
 
@@ -359,46 +367,57 @@ ${currentDateISO}
     }
 
     // 13. MUTATE TOPIC COUNTERS & UPDATE WORKSPACE DATABASE
-    if (aiData.current_taught_subtopic) {
-      const taughtName = aiData.current_taught_subtopic;
+  if (aiData.current_taught_subtopic) {
+  const taughtName = aiData.current_taught_subtopic.trim();
 
-      // Update in-memory session counter
-      let matchedIndex = currentTopics.findIndex(
-        t => t.name.trim().toLowerCase() === taughtName.trim().toLowerCase()
-      );
+  const matchedIndex = currentTopics.findIndex(
+    t => t.topic && t.topic.trim().toLowerCase() === taughtName.toLowerCase()
+  );
 
-      if (matchedIndex !== -1) {
-        currentTopics[matchedIndex].counter += 1;
-      } else {
-        currentTopics.push({ name: taughtName, counter: 1 });
+  if (matchedIndex !== -1) {
+    currentTopics[matchedIndex].counter = (currentTopics[matchedIndex].counter || 0) + 1;
+
+    await Workspace.updateOne(
+      { 
+        _id: workspace._id, 
+        "detailedTopics.subtopics.name": currentTopics[matchedIndex].topic 
+      },
+      { 
+        $set: { 
+          "detailedTopics.$[].subtopics.$[sub].last_learned_at": new Date() 
+        } 
+      },
+      {
+        arrayFilters: [
+          { "sub.name": currentTopics[matchedIndex].topic }
+        ]
+      }
+    );
+  }
+}
+
+// Initialize block-scoped variable outside try-catch to ensure it's accessible at the end of the route
+    let isTestPending = false;
+    
+// 14. SYNC CURRENT TOPICS & HANDLE TEST PENDING LOCK
+    try {
+      isTestPending = Boolean(aiData.test_pending);
+      
+      if (isTestPending) {
+        console.log("in /chat : test_pending flag is true. Locking user chat...");
+        user.chatLock = true;
+        finalAnswer = "Take test now, till then, the chat is freezed.";
       }
 
-      // Update last_learned_at timestamp in MongoDB
-      await Workspace.updateOne(
-        { 
-          _id: workspace._id, 
-          "detailedTopics.subtopics.name": taughtName 
-        },
-        { 
-          $set: { 
-            "detailedTopics.$[].subtopics.$[sub].last_learned_at": new Date() 
-          } 
-        },
-        {
-          arrayFilters: [
-            { "sub.name": taughtName }
-          ]
-        }
-      );
-    }
-
-    // 14. TEST PENDING / CHAT LOCK TRIGGER
-    let isTestPending = Boolean(aiData.test_pending);
-    if (isTestPending) {
-      console.log("in /chat : test_pending flag is true. Locking user chat...");
-      user.chatLock = true;
+      // Sync the mutated in-memory array to the user document
+      user.currentTopics = currentTopics || [];
+      user.markModified("currentTopics");
+      
+      // One single save for both the chat lock and the current topics
       await user.save();
-      finalAnswer = "Take test now, till then, the chat is freezed.";
+      
+    } catch (saveError) {
+      console.error("in /chat : Failed to update User DB:", saveError.message);
     }
 
     // 15. SAVE INTERACTION TO CHAT COLLECTION
@@ -415,6 +434,7 @@ ${currentDateISO}
     } catch (dbError) {
       console.error("in /chat : Failed to save chat to DB:", dbError.message);
     }
+
 
     // 16. RETURN CLEAN PAYLOAD TO FRONTEND
     return res.status(200).json({

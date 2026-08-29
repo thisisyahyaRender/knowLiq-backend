@@ -1,5 +1,13 @@
 const mongoose = require('mongoose');
 
+const currentTopicSchema = new mongoose.Schema(
+  {
+    topic: { type: String, required: true, trim: true },
+    counter: { type: Number, default: 0 }
+  },
+  { _id: false } // Correctly disables auto-generated _id
+);
+
 const userSchema = new mongoose.Schema({
   uid: { 
     type: String, 
@@ -21,6 +29,9 @@ const userSchema = new mongoose.Schema({
   type: String,
   trim: true
 }],
+
+currentTopics: [currentTopicSchema],
+
 test_Pending : {type : Boolean, default : false},
 
 }, { 
