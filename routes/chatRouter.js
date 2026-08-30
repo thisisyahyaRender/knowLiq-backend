@@ -88,7 +88,7 @@ router.post("/chat", verifyLogin, async (req, res) => {
     const user = await User.findOne({ uid });
     if (!user) return res.status(400).json({ success: "false", error: "User does not exist." });
 
-    if (user.chatLock) {
+    if (user.test_pending) {
       return res.status(403).json({
         success: "false",
         error: "**Take test now, till then, the chat is freezed.**",
@@ -405,7 +405,7 @@ ${currentDateISO}
       
       if (isTestPending) {
         console.log("in /chat : test_pending flag is true. Locking user chat...");
-        user.chatLock = true;
+        user.test_pending = true;
         finalAnswer = "Take test now, till then, the chat is freezed.";
       }
 

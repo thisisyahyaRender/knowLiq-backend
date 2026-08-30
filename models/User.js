@@ -32,7 +32,7 @@ const userSchema = new mongoose.Schema({
 
 currentTopics: [currentTopicSchema],
 
-test_Pending : {type : Boolean, default : false},
+test_pending : {type : Boolean, default : false},
 
 }, { 
   timestamps: true // Automatically adds createdAt and updatedAt dates
