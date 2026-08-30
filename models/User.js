@@ -3,8 +3,10 @@ const mongoose = require('mongoose');
 const currentTopicSchema = new mongoose.Schema(
   {
     topic: { type: String, required: true, trim: true },
-    counter: { type: Number, default: 0 }
+    counter: { type: Number, default: 0 },
+ started_at : {type : Date, default : Date.now},
   },
+  
   { _id: false } // Correctly disables auto-generated _id
 );
 

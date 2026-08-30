@@ -56,7 +56,7 @@ router.post("/chat", verifyLogin, async (req, res) => {
     //     currentTopics = [];
     //   }
     // }
-    
+
 
 
     // 1. Model mapping dictionary
@@ -88,13 +88,7 @@ router.post("/chat", verifyLogin, async (req, res) => {
     const user = await User.findOne({ uid });
     if (!user) return res.status(400).json({ success: "false", error: "User does not exist." });
 
-    if (user.test_pending) {
-      return res.status(403).json({
-        success: "false",
-        error: "**Take test now, till then, the chat is freezed.**",
-        chat_locked: true
-      });
-    }
+
 
     // 4. Fetch Workspace
     const workspace = await Workspace.findOne({ owner: user._id, subject: subject.trim() });
@@ -102,9 +96,20 @@ router.post("/chat", verifyLogin, async (req, res) => {
 
     const topicNamesList = workspace.detailedTopics.map(t => t.topic).join(", ");
 
-  let currentTopics = user.currentTopics || [];
+    let currentTopics = user.currentTopics || [];
 
-      // Log the received topics
+    if (user.test_pending) {
+      return res.status(403).json({
+        success: "false",
+        // Add the markdown link here as well!
+        answer: `**Take Test Now, The chat is freezed till then.**\n\n[👉 Click here to start the test](/takeTest?subject=${encodeURIComponent(subject.trim())})`,
+        "current-topics": currentTopics,
+        test_pending: true,
+        chat_locked: user.chatLock || false
+      });
+    }
+
+    // Log the received topics
     console.log(`in /chat : Received current-topics from memory :`, JSON.stringify(currentTopics));
 
     // 5. FIRST-TIME SESSION CHECK: Pick initial subtopics using gpt-4o-mini
@@ -112,6 +117,45 @@ router.post("/chat", verifyLogin, async (req, res) => {
       console.log("in /chat : Initializing new session topics via gpt-4o-mini...");
 
       const currentDateISO = new Date().toISOString();
+      // 1. Calculate overdue intervals in JavaScript (100% reliable)
+      const now = new Date();
+      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+      const categorizedSubtopics = [];
+
+      workspace.detailedTopics.forEach((parent) => {
+        if (!Array.isArray(parent.subtopics)) return;
+
+        parent.subtopics.forEach((st) => {
+          let isOverdue = false;
+          let daysSinceLast = null;
+
+          if (st.last_learned_at) {
+            const lastLearned = new Date(st.last_learned_at);
+            daysSinceLast = (now - lastLearned) / ONE_DAY_MS;
+
+            // Check spaced-repetition intervals
+            if (st.retention === 'red' && daysSinceLast >= 1) isOverdue = true;
+            else if (st.retention === 'yellow' && daysSinceLast >= 3) isOverdue = true;
+            else if (st.retention === 'green' && daysSinceLast >= 7) isOverdue = true;
+          } else {
+            // Untested topics are always eligible
+            isOverdue = true;
+          }
+
+          // STRICT FILTER: If studied today / not overdue, exclude from the pick candidate pool
+          if (isOverdue) {
+            categorizedSubtopics.push({
+              topic: parent.topic,
+              subtopic: st.name,
+              retention: st.retention,
+              importance_score: parent.importance_score || 0,
+              total_marks: parent.total_marks || 0,
+              days_since_last_learned: daysSinceLast !== null ? Number(daysSinceLast.toFixed(1)) : 'never',
+            });
+          }
+        });
+      });
 
       const topicPickerResponse = await openai.chat.completions.create({
         model: "gpt-4o-mini",
@@ -141,40 +185,22 @@ router.post("/chat", verifyLogin, async (req, res) => {
         messages: [
           {
             role: "system",
-            content: `You are an intelligent curriculum planner and spaced-repetition algorithm.
-Your job is to analyze the user's syllabus and select 1 to 2 subtopics for today's study session.
+            content: `You are an academic curriculum scheduler.
+Select exactly 2 to 3 subtopics for today's study session from the ELIGIBLE candidates provided.
 
-### TODAY'S DATE:
-${currentDateISO}
+### SELECTION PRIORITY RULES:
+1. First priority: Subtopics with retention: 'red'.
+2. Second priority: Subtopics with retention: 'yellow'.
+3. Third priority: Subtopics with retention: 'green'.
+4. Fourth priority: Subtopics with retention: 'untested' (favoring those with highest total_marks and importance_score).
+5. Tie-breaker: Pick items with the highest total_marks / importance_score.
 
-### SYLLABUS SCHEMA DEFINITION:
-- "topic": Parent topic name.
-- "importance_score" & "total_marks": Exam weight. Higher marks = higher priority.
-- "subtopics.name": Exact subtopic title.
-- "subtopics.historical_score": Historical fluency score (0.0 to 1.0).
-- "subtopics.retention": Recall grade from the most recent test ('red', 'yellow', 'green', or 'untested').
-- "subtopics.last_learned_at": UTC ISO date string when the user last studied this subtopic (or null if never learned).
-
-### SPACED REPETITION REVIEW INTERVALS:
-Calculate the difference between TODAY'S DATE and "last_learned_at":
-- RED (Poor retention): Review is OVERDUE if $\\ge 1$ day has passed since last_learned_at.
-- YELLOW (Shaky retention): Review is OVERDUE if $\\ge 3$ days have passed since last_learned_at.
-- GREEN (Strong retention): Review is OVERDUE if $\\ge 7$ days have passed since last_learned_at.
-- UNTESTED: Brand new concept (last_learned_at is null).
-
-### SELECTION & PRIORITY ALGORITHM:
-1. CRITICAL PRIORITY (Overdue Red Items): If any subtopic has "retention: 'red'" and is $\\ge 1$ day overdue, you MUST select it. (Even if historical_score is high like 0.7 or 0.8, a RED retention flag overrides everything).
-2. SECONDARY PRIORITY (Overdue Yellow Items): Next, pick subtopics with "retention: 'yellow'" that are $\\ge 3$ days overdue.
-3. TERTIARY PRIORITY (Overdue Green Items): Next, pick subtopics with "retention: 'green'" that are $\\ge 7$ days overdue.
-4. NEW HIGH-YIELD TOPICS: If no reviews are currently overdue, select from "retention: 'untested'" (never learned) subtopics belonging to the parent topics with the highest "total_marks" and "importance_score".
-5. TIE-BREAKER: If multiple topics are overdue within the same retention level, pick the one belonging to the parent topic with the highest "total_marks" / "importance_score".
-
-Return only 2 or 3 exact subtopic names.`
+CRITICAL: Return ONLY exact subtopic names present in the provided list.`
           },
           {
             role: "user",
-            content: `Full Syllabus:\n${JSON.stringify(workspace.detailedTopics, null, 2)}`
-          }
+            content: `Eligible Candidate Subtopics:\n${JSON.stringify(categorizedSubtopics, null, 2)}`,
+          },
         ]
       });
 
@@ -185,10 +211,10 @@ Return only 2 or 3 exact subtopic names.`
       console.log("in /chat : Topics selected:", pickerData.selected_subtopics, "| Rationale:", pickerData.selection_rationale);
 
       // To this:
-currentTopics = pickerData.selected_subtopics.map(name => ({
-  topic: name, // ✅ CORRECT (Matches your Mongoose schema)
-  counter: 0
-}));
+      currentTopics = pickerData.selected_subtopics.map(name => ({
+        topic: name, // ✅ CORRECT (Matches your Mongoose schema)
+        counter: 0
+      }));
     }
 
     // 6. Generate Embedding for User Query
@@ -230,14 +256,14 @@ currentTopics = pickerData.selected_subtopics.map(name => ({
 
     // 8. Prepare Active State String
     // When preparing prompt string:
-const activeSessionTopicsString = currentTopics
-  .map(t => `${t.topic} (Turns spent: ${t.counter})`)
-  .join(", ");
+    const activeSessionTopicsString = currentTopics
+      .map(t => `${t.topic} (Turns spent: ${t.counter})`)
+      .join(", ");
 
-   
-    
 
-const systemPrompt = `You are an elite, interactive AI tutor. Your directive is to keep the student perfectly focused using bite-sized learning and active recall.
+
+
+    const systemPrompt = `You are an elite, interactive AI tutor. Your directive is to keep the student perfectly focused using bite-sized learning and active recall.
 
 ### CURRENT SESSION CONTEXT
 You are currently focusing ONLY on these subtopics with the user:
@@ -327,7 +353,7 @@ ${longTermContext}
 
       const currentDateISO = new Date().toISOString();
 
-     const metaCounselorResponse = await openai.chat.completions.create({
+      const metaCounselorResponse = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
           {
@@ -367,42 +393,42 @@ ${currentDateISO}
     }
 
     // 13. MUTATE TOPIC COUNTERS & UPDATE WORKSPACE DATABASE
-  if (aiData.current_taught_subtopic) {
-  const taughtName = aiData.current_taught_subtopic.trim();
+    if (aiData.current_taught_subtopic) {
+      const taughtName = aiData.current_taught_subtopic.trim();
 
-  const matchedIndex = currentTopics.findIndex(
-    t => t.topic && t.topic.trim().toLowerCase() === taughtName.toLowerCase()
-  );
+      const matchedIndex = currentTopics.findIndex(
+        t => t.topic && t.topic.trim().toLowerCase() === taughtName.toLowerCase()
+      );
 
-  if (matchedIndex !== -1) {
-    currentTopics[matchedIndex].counter = (currentTopics[matchedIndex].counter || 0) + 1;
+      if (matchedIndex !== -1) {
+        currentTopics[matchedIndex].counter = (currentTopics[matchedIndex].counter || 0) + 1;
 
-    await Workspace.updateOne(
-      { 
-        _id: workspace._id, 
-        "detailedTopics.subtopics.name": currentTopics[matchedIndex].topic 
-      },
-      { 
-        $set: { 
-          "detailedTopics.$[].subtopics.$[sub].last_learned_at": new Date() 
-        } 
-      },
-      {
-        arrayFilters: [
-          { "sub.name": currentTopics[matchedIndex].topic }
-        ]
+        await Workspace.updateOne(
+          {
+            _id: workspace._id,
+            "detailedTopics.subtopics.name": currentTopics[matchedIndex].topic
+          },
+          {
+            $set: {
+              "detailedTopics.$[].subtopics.$[sub].last_learned_at": new Date()
+            }
+          },
+          {
+            arrayFilters: [
+              { "sub.name": currentTopics[matchedIndex].topic }
+            ]
+          }
+        );
       }
-    );
-  }
-}
+    }
 
-// Initialize block-scoped variable outside try-catch to ensure it's accessible at the end of the route
+    // Initialize block-scoped variable outside try-catch to ensure it's accessible at the end of the route
     let isTestPending = false;
-    
-// 14. SYNC CURRENT TOPICS & HANDLE TEST PENDING LOCK
+
+    // 14. SYNC CURRENT TOPICS & HANDLE TEST PENDING LOCK
     try {
       isTestPending = Boolean(aiData.test_pending);
-      
+
       if (isTestPending) {
         console.log("in /chat : test_pending flag is true. Locking user chat...");
         user.test_pending = true;
@@ -412,10 +438,10 @@ ${currentDateISO}
       // Sync the mutated in-memory array to the user document
       user.currentTopics = currentTopics || [];
       user.markModified("currentTopics");
-      
+
       // One single save for both the chat lock and the current topics
       await user.save();
-      
+
     } catch (saveError) {
       console.error("in /chat : Failed to update User DB:", saveError.message);
     }
@@ -673,10 +699,11 @@ Answer the user's actual question directly.
   }
 });
 
+
 router.get("/fetch-chat", verifyLogin, async (req, res) => {
   try {
     const { uid } = req;
-    
+
     // Use req.query for GET requests (e.g., /fetch-chat?subject=Physics)
     const { subject } = req.query;
 
@@ -690,23 +717,36 @@ router.get("/fetch-chat", verifyLogin, async (req, res) => {
       return res.status(400).json({ success: "false", error: "User does not exist" });
     }
 
+    const isTestPending = user.test_pending || false;
+
     // Find chats for this user and subject, sorted from oldest to newest
-    const chats = await Chat.find({ 
-      user: user._id, 
-      subject: subject 
+    const chats = await Chat.find({
+      user: user._id,
+      subject: subject
     }).sort({ createdAt: 1 });
 
-    return res.status(200).json({ 
-      success: "true", 
+    // Convert Mongoose documents to standard JS array so we can safely modify it
+    const chatData = chats.map(chat => chat.toObject());
+
+    // If a test is pending, automatically append the "Take Test" card to the chat history
+    if (isTestPending) {
+      chatData.push({
+        answer: `### 🛑 Chat is Freezed!\n\n**Time to prove what you've learned.** You must complete your pending evaluation to unlock this workspace.\n\n[👉 CLICK HERE TO TAKE TEST NOW](/takeTest?subject=${encodeURIComponent(subject.trim())})`
+      });
+    }
+
+    return res.status(200).json({
+      success: "true",
       message: "Chats retrieved successfully",
-      data: chats // Actually return the fetched chats to the frontend!
+      data: chatData,
+      test_pending: isTestPending, // Fixed: dynamically send actual user state, not hardcoded true
     });
 
   } catch (error) {
     console.error("error in /fetch-chat:", error.message);
-    return res.status(500).json({ 
-      success: "false", 
-      error: "Something went wrong!" 
+    return res.status(500).json({
+      success: "false",
+      error: "Something went wrong!"
     });
   }
 });
@@ -721,10 +761,10 @@ router.get("/shared/:shared_workspace_id", async (req, res) => {
     }
 
     // 1. Find the workspace to get the associated owner and subject
- const workspace = await Workspace.findOne({ 
-  _id: shared_workspace_id, 
-  shared: true 
-});
+    const workspace = await Workspace.findOne({
+      _id: shared_workspace_id,
+      shared: true
+    });
 
     if (!workspace) {
       return res.status(404).json({ success: false, error: "Shared workspace not found" });
@@ -734,31 +774,31 @@ router.get("/shared/:shared_workspace_id", async (req, res) => {
     const { owner, subject } = workspace;
 
     // 3. Find chats using the workspace's owner ID and subject
-    const chats = await Chat.find({ 
-      user: owner, 
-      subject: subject 
+    const chats = await Chat.find({
+      user: owner,
+      subject: subject
     }).sort({ createdAt: 1 });
 
-    return res.status(200).json({ 
-      success: true, 
+    return res.status(200).json({
+      success: true,
       message: "Shared chats retrieved successfully",
-      data: chats 
+      data: chats
     });
 
   } catch (error) {
     console.error("error in /shared/:shared_workspace_id:", error.message);
-    
+
     // Handle cases where the shared_workspace_id is not a valid MongoDB ObjectId format
     if (error.name === "CastError") {
-      return res.status(400).json({ 
-        success: false, 
-        error: "Invalid workspace ID format" 
+      return res.status(400).json({
+        success: false,
+        error: "Invalid workspace ID format"
       });
     }
 
-    return res.status(500).json({ 
-      success: false, 
-      error: "Something went wrong!" 
+    return res.status(500).json({
+      success: false,
+      error: "Something went wrong!"
     });
   }
 });
@@ -789,7 +829,7 @@ router.post("/create_workspace_shared", verifyLogin, async (req, res) => {
     const workspace = await Workspace.findOneAndUpdate(
       { owner: user._id, subject: subject },
       { $set: { shared: true } },
-      { new: true } 
+      { new: true }
     );
 
     if (!workspace) {
@@ -797,17 +837,17 @@ router.post("/create_workspace_shared", verifyLogin, async (req, res) => {
     }
 
     // 3. Return the workspace._id as requested
-    return res.status(200).json({ 
-      success: true, 
+    return res.status(200).json({
+      success: true,
       message: "Workspace shared successfully",
-      shared_workspace_id: workspace._id 
+      shared_workspace_id: workspace._id
     });
 
   } catch (error) {
     console.error("error in /create_workspace_shared:", error.message);
-    return res.status(500).json({ 
-      success: false, 
-      error: "Something went wrong!" 
+    return res.status(500).json({
+      success: false,
+      error: "Something went wrong!"
     });
   }
 });

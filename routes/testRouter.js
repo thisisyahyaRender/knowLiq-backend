@@ -13,11 +13,15 @@ const verifyLogin = require("../middlewares/verifyLogin.js");
 const PastPaper = require("../models/PastPaper.js");
 const User = require('../models/User');
 const Workspace = require("../models/Workspace");
+const Chat = require("../models/Chat.js");
+const Test = require("../models/Test"); // Adjust path if necessary
 // const pdfPoppler = require("pdf-poppler");
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+
 
 router.post("/make-test", verifyLogin, async (req, res) => {
   try {
@@ -38,28 +42,82 @@ router.post("/make-test", verifyLogin, async (req, res) => {
       return res.status(404).json({ success: "false", error: "User not found" });
     }
 
+    // --- SAFETY CHECK ---
+    if (user.test_pending !== true) {
+      console.log("in /make-test : safety check failed - test_pending is false");
+      return res.status(403).json({ 
+        success: "false", 
+        error: "No test is pending for this user." 
+      });
+    }
+
     const workspace = await Workspace.findOne({ owner: user._id, subject: subject.trim() });
     if (!workspace) {
       return res.status(404).json({ success: "false", error: "Workspace not found" });
     }
 
-    // 2. Prepare Data for AI
-    // We send the detailed topics so the AI sees the current scores (initially 0)
-    const topicsData = JSON.stringify(workspace.detailedTopics, null, 2);
+    // 2. Extract allowed topics and the started_at timestamp
+    const allowedTopics = user.currentTopics ? user.currentTopics.map((m) => m.topic) : [];
+    const startedAt = user.currentTopics?.[0]?.started_at;
 
+    // 3. Query chats created on or after started_at
+    console.log("in /make-test : querying recent chats...");
+    const chats = await Chat.find(
+      {
+        user: user._id,
+        subject: subject,
+        ...(startedAt && { date: { $gte: startedAt } }),
+      },
+      {
+        query: 1,
+        answer: 1,
+        _id: 0,
+      }
+    )
+      .sort({ date: 1 })
+      .limit(100);
+
+    // 4. STEP 1: Summarize chat history into pure text (no JSON)
+    let chatSummaryText = "No recent study chat history available.";
+
+    if (chats.length > 0) {
+      console.log(`in /make-test : summarizing ${chats.length} chat interactions...`);
+      const conversationText = chats
+        .map((c, i) => `Turn ${i + 1}:\nStudent Question: ${c.query}\nAssistant Answer: ${c.answer}`)
+        .join("\n\n");
+
+      const summaryCompletion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are an academic analysis assistant. Summarize the student's conversation history regarding "${subject}". Focus on concepts discussed, areas where the student had confusion or gaps, and their general level of understanding. Return your summary as pure, concise plain text with NO JSON formatting, NO markdown fences, and NO bullet lists.`,
+          },
+          {
+            role: "user",
+            content: `Student Chat History:\n\n${conversationText}`,
+          },
+        ],
+      });
+
+      chatSummaryText = summaryCompletion.choices[0].message.content.trim();
+    }
+
+    // 5. STEP 2: Generate Structured Test Questions (5 to 9 questions)
+    console.log("in /make-test : sending request to OpenAI for structured test generation...");
     const systemPrompt = `You are an expert academic examiner designing a diagnostic test for the subject: "${subject}".
-    
-You are provided with the student's extracted topics, subtopics, and their current mastery scores (0 to 1). 
-Your task is to generate exactly 5 to 6 powerful questions.
 
-CORE RULES:
-1. Target areas for improvement: Look at the scores (0 means completely untested/unknown). Target high-importance topics or foundational subtopics first.
-2. Synthesize concepts: Topics often depend on each other. You may formulate questions that span multiple subtopics to test deep understanding and boundaries.
-3. Check familiarity: The questions should be challenging enough to expose the edges of the student's conceptual knowledge, not just basic recall.
-4. Return ONLY a valid JSON object matching the strict schema.`;
+STRICT TOPIC CONSTRAINT:
+You MUST ONLY create questions and assign "target_topics" strictly from this explicit allowed list of topics:
+${JSON.stringify(allowedTopics, null, 2)}
+Do NOT include, test, or mention any topics or subtopics outside of this list.
 
-    // 3. Call OpenAI (gpt-5.6-sol) with Structured Outputs
-    console.log("in /make-test : sending request to OpenAI (gpt-5.6-sol)...");
+RULES FOR QUESTIONS:
+1. Generate between 5 and 9 questions (minimum 5, maximum 9).
+2. Use the provided study chat summary to identify weak points, gaps, and areas tested during their study session.
+3. Formulate deep conceptual and diagnostic questions to test the student's boundaries.
+4. Return ONLY a valid JSON object strictly matching the provided schema.`;
+
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       response_format: {
@@ -72,45 +130,51 @@ CORE RULES:
             properties: {
               questions: {
                 type: "array",
-                description: "An array of 5 to 6 test questions.",
+                description: "An array of 5 to 9 test questions.",
                 items: {
                   type: "object",
                   properties: {
-                    id: { type: "integer" },
+                    question_id: { 
+                      type: "integer",
+                      description: "Sequential question number starting from 1." 
+                    },
                     text: {
                       type: "string",
-                      description: "The actual question text testing the user's boundaries."
+                      description: "The actual diagnostic question text.",
                     },
                     target_topics: {
                       type: "array",
                       items: { type: "string" },
-                      description: "List of subtopics this question evaluates."
-                    }
+                      description: "List of topics from the allowed list evaluated by this question.",
+                    },
                   },
-                  required: ["id", "text", "target_topics"],
-                  additionalProperties: false
-                }
-              }
+                  required: ["question_id", "text", "target_topics"],
+                  additionalProperties: false,
+                },
+              },
             },
             required: ["questions"],
-            additionalProperties: false
-          }
-        }
+            additionalProperties: false,
+          },
+        },
       },
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `Student's Topic Data:\n${topicsData}` }
-      ]
+        {
+          role: "user",
+          content: `Allowed Topics:\n${JSON.stringify(allowedTopics, null, 2)}\n\nRecent Study History Summary:\n${chatSummaryText}`,
+        },
+      ],
     });
 
-    // 4. Token & Cost Logging
+    // 6. Token & Cost Logging
     if (completion.usage) {
       const inputTokens = completion.usage.prompt_tokens || 0;
       const outputTokens = completion.usage.completion_tokens || 0;
-      const totalTokens = completion.usage.total_tokens || (inputTokens + outputTokens);
+      const totalTokens = completion.usage.total_tokens || inputTokens + outputTokens;
 
-      const INPUT_RATE_PER_MILLION = 4.00;
-      const OUTPUT_RATE_PER_MILLION = 12.0;
+      const INPUT_RATE_PER_MILLION = 0.15;
+      const OUTPUT_RATE_PER_MILLION = 0.60;
 
       const estimatedInputCost = (inputTokens / 1_000_000) * INPUT_RATE_PER_MILLION;
       const estimatedOutputCost = (outputTokens / 1_000_000) * OUTPUT_RATE_PER_MILLION;
@@ -124,20 +188,33 @@ CORE RULES:
       console.log(`in /make-test : -----------------------`);
     }
 
-    // 5. Parse and Return
+    // 7. Parse, Save to Database, and Return
     const parsedResponse = JSON.parse(completion.choices[0].message.content);
     console.log(`in /make-test : successfully generated ${parsedResponse.questions.length} questions.`);
 
+    // Remove any previous abandoned pending tests for this user/subject to avoid conflicts
+    await Test.deleteMany({ user: user._id, subject: subject.trim(), status: 'pending' });
+
+    // Save the new test to the database
+    const newTest = new Test({
+      user: user._id,
+      subject: subject.trim(),
+      status: 'pending',
+      questions: parsedResponse.questions
+    });
+    await newTest.save();
+
     return res.status(200).json({
       success: "true",
-      questions: parsedResponse.questions
+      test_id: newTest._id,
+      questions: parsedResponse.questions,
     });
 
   } catch (error) {
     console.error("in /make-test : CRITICAL ERROR:", error);
     return res.status(500).json({
       success: "false",
-      error: "Failed to generate test. Internal server error."
+      error: "Failed to generate test. Internal server error.",
     });
   }
 });
@@ -168,34 +245,48 @@ router.post("/submit-test", verifyLogin, async (req, res) => {
       return res.status(404).json({ success: "false", error: "User not found" });
     }
 
+    // --- SAFETY CHECK ---
+    if (user.test_pending !== true) {
+      console.log("in /submit-test : safety check failed - test_pending is false");
+      return res.status(403).json({ 
+        success: "false", 
+        error: "No test is pending for this user." 
+      });
+    }
+
     const workspace = await Workspace.findOne({ owner: user._id, subject: subject.trim() });
     if (!workspace) {
       return res.status(404).json({ success: "false", error: "Workspace not found" });
     }
 
+    // FETCH THE PENDING TEST FROM DB
+    const pendingTest = await Test.findOne({ user: user._id, subject: subject.trim(), status: 'pending' });
+    if (!pendingTest) {
+      return res.status(404).json({ success: "false", error: "No pending test found to submit." });
+    }
+
+    // 3. Extract exact active subtopics (since user.currentTopics stores subtopic names)
+    const activeSubtopics = user.currentTopics ? user.currentTopics.map((m) => m.topic) : [];
+    
     // Prepare inputs for AI
-    const syllabusData = JSON.stringify(workspace.detailedTopics, null, 2);
     const userSubmissionsData = JSON.stringify(submissions, null, 2);
 
-    const systemPrompt = `You are an objective, strict academic grading engine designed to prevent grade inflation. Your task is to evaluate the student's test answers against academic standards and assign a calibrated mastery score between 0.00 and 1.00 for each evaluated subtopic.
+    const systemPrompt = `You are an objective, strict academic grading engine. Your task is to evaluate the student's test answers against academic standards and assign a retention status (color) and actionable remarks for each evaluated subtopic.
 
-### CALIBRATION BENCHMARKS:
-- 1.00: Flawless, completely accurate, covers all critical nuances and correct terminology.
-- 0.80 - 0.90: Conceptually solid, correct reasoning, but minor phrasing flaws or tiny omitted details.
-- 0.60 - 0.75: Understands the main idea, but misses a key step, formula detail, or secondary condition.
-- 0.40 - 0.55: Displays partial understanding; recognizes concepts but omits half the core components or makes substantial calculation/logic errors.
-- 0.20 - 0.35: Mentions relevant keywords or formulas but shows fundamentally flawed reasoning.
-- 0.00 - 0.15: Completely incorrect, blank, hallucinatory, or completely irrelevant/off-topic.
+### CALIBRATION BENCHMARKS FOR RETENTION:
+- "green": Good to Best performance. Flawless, conceptually solid, covers all critical nuances and correct terminology.
+- "yellow": Satisfactory to Good. Understands the main idea, but misses a key step, formula detail, or secondary condition.
+- "red": Poor performance. Displays partial understanding, fundamentally flawed reasoning, omits core components, or is completely incorrect/blank.
 
 ### GRADING PROTOCOL:
 1. Analyze each question and answer step-by-step.
-2. Explicitly note what the student got right, what was omitted, and what was incorrect (in evaluation_notes).
-3. Map the performance directly to the relevant subtopic in the syllabus.
-4. Output the precise score (e.g., 0.85, 0.40, 0.65) reflecting the severity of errors based strictly on the benchmarks above.
+2. Determine the retention color ("red", "yellow", or "green") based on the benchmarks.
+3. Write actionable "remarks" explaining exactly what the student got right, what was incorrect, and how they need to improve this specific subtopic.
+4. Output the exact "subtopic_name" STRICTLY chosen from the ALLOWED SUBTOPICS list provided. Do NOT invent or alter names.
 5. Return ONLY a valid JSON object matching the strict schema.`;
 
-    // 3. Call OpenAI (gpt-5.6-luna) with Structured Outputs
-    console.log("in /submit-test : sending request to OpenAI (gpt-5.6-luna) for grading...");
+    // 4. Call OpenAI (gpt-4o-mini) with Structured Outputs
+    console.log("in /submit-test : sending request to OpenAI (gpt-4o-mini) for grading...");
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       response_format: {
@@ -208,28 +299,25 @@ router.post("/submit-test", verifyLogin, async (req, res) => {
             properties: {
               updated_subtopics: {
                 type: "array",
-                description: "List of evaluated subtopics with calibrated mastery scores.",
+                description: "List of evaluated subtopics with retention status and remarks.",
                 items: {
                   type: "object",
                   properties: {
-                    topic_name: { 
-                      type: "string", 
-                      description: "The exact name of the parent topic." 
-                    },
                     subtopic_name: { 
                       type: "string", 
-                      description: "The exact name of the subtopic." 
+                      description: "The exact name of the subtopic from the allowed list." 
                     },
-                    evaluation_notes: {
+                    remarks: {
                       type: "string",
-                      description: "Brief analysis of student errors and reasoning for deductions."
+                      description: "Statement explaining what needs improvement and how."
                     },
-                    new_score: { 
-                      type: "number", 
-                      description: "The calibrated mastery score from 0.00 to 1.00." 
+                    retention: { 
+                      type: "string", 
+                      enum: ["red", "yellow", "green"],
+                      description: "The evaluated retention status (red, yellow, or green)." 
                     }
                   },
-                  required: ["topic_name", "subtopic_name", "evaluation_notes", "new_score"],
+                  required: ["subtopic_name", "remarks", "retention"],
                   additionalProperties: false
                 }
               }
@@ -241,18 +329,18 @@ router.post("/submit-test", verifyLogin, async (req, res) => {
       },
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `Syllabus Data:\n${syllabusData}\n\nStudent Submissions:\n${userSubmissionsData}` }
+        { role: "user", content: `ALLOWED SUBTOPICS (Use ONLY these exact names):\n${JSON.stringify(activeSubtopics)}\n\nStudent Submissions:\n${userSubmissionsData}` }
       ]
     });
 
-    // 4. Token & Cost Logging
+    // 5. Token & Cost Logging
     if (completion.usage) {
       const inputTokens = completion.usage.prompt_tokens || 0;
       const outputTokens = completion.usage.completion_tokens || 0;
       const totalTokens = completion.usage.total_tokens || (inputTokens + outputTokens);
 
-      const INPUT_RATE_PER_MILLION = 0.20;
-      const OUTPUT_RATE_PER_MILLION = 1.20;
+      const INPUT_RATE_PER_MILLION = 0.15;
+      const OUTPUT_RATE_PER_MILLION = 0.60;
 
       const estimatedInputCost = (inputTokens / 1_000_000) * INPUT_RATE_PER_MILLION;
       const estimatedOutputCost = (outputTokens / 1_000_000) * OUTPUT_RATE_PER_MILLION;
@@ -266,42 +354,84 @@ router.post("/submit-test", verifyLogin, async (req, res) => {
       console.log(`in /submit-test : -----------------------`);
     }
 
-    // 5. Parse AI Response
+    // 6. Parse AI Response
     const parsedResponse = JSON.parse(completion.choices[0].message.content);
     const updates = parsedResponse.updated_subtopics || [];
     
     console.log(`in /submit-test : AI evaluated ${updates.length} subtopics.`);
 
-    // 6. Update MongoDB Workspace Document
+    // 7. Update MongoDB Workspace Document Manually
     if (updates.length > 0) {
-      console.log("in /submit-test : updating workspace subtopic scores in DB...");
+      console.log("in /submit-test : manually scanning workspace to update subtopic retention status...");
       
       let isModified = false;
 
       updates.forEach((update) => {
-        // Find the parent topic in the detailedTopics array
-        const topicDoc = workspace.detailedTopics.find(t => t.topic === update.topic_name);
-        
-        if (topicDoc && topicDoc.subtopicScores) {
-          // Verify this subtopic actually exists in our Map before updating
-          if (topicDoc.subtopicScores.has(update.subtopic_name)) {
-            // Mongoose Map '.set()' triggers tracking for updates
-            topicDoc.subtopicScores.set(update.subtopic_name, update.new_score);
-            isModified = true;
+        // Robust Matching: Trim and lowercase to prevent minor string mismatches
+        const targetSubtopic = update.subtopic_name.trim().toLowerCase();
+
+        // Iterate through all parent topics in the workspace
+        for (const topicDoc of workspace.detailedTopics) {
+          if (Array.isArray(topicDoc.subtopics)) {
+            // Check if the subtopic exists under this parent topic
+            const subtopicDoc = topicDoc.subtopics.find(
+              st => st.name.trim().toLowerCase() === targetSubtopic
+            );
+            
+            if (subtopicDoc) {
+              // Found it! Apply the updates
+              subtopicDoc.retention = update.retention;
+              subtopicDoc.remarks = update.remarks;
+              subtopicDoc.last_learned_at = new Date();
+              isModified = true;
+              
+              // Break out of the inner loop since we found and updated the target subtopic
+              break; 
+            }
           }
         }
       });
 
       // Save the document if changes were made
       if (isModified) {
+        workspace.markModified('detailedTopics'); // Explicitly tell mongoose the nested array changed
         await workspace.save();
         console.log("in /submit-test : workspace scores successfully updated and saved.");
       } else {
-        console.log("in /submit-test : no matching topics/subtopics found to update.");
+        console.log("in /submit-test : no matching subtopics found in the workspace to update.");
       }
     }
 
-    // 7. Return Response
+
+    // 7.5 Update and save the actual Test document
+    if (updates.length > 0) {
+      console.log("in /submit-test : saving user answers and AI evaluations to Test document...");
+      
+      // Format submissions to match answerSchema
+      pendingTest.answers = submissions.map(sub => ({
+        question_id: sub.question_id,
+        answer_text: sub.answer || ""
+      }));
+
+      // Format AI updates to match evaluationSchema
+      pendingTest.evaluations = updates.map(up => ({
+        subtopic_name: up.subtopic_name,
+        remarks: up.remarks,
+        retention: up.retention
+      }));
+
+      // Mark test as graded
+      pendingTest.status = 'graded';
+      await pendingTest.save();
+      console.log("in /submit-test : Test document saved successfully.");
+    }
+
+    // 8. Clear the pending test flag from the user
+    user.test_pending = false;
+    user.currentTopics = [];
+    await user.save();
+
+    // 9. Return Response
     return res.status(200).json({
       success: "true",
       message: "Test graded and workspace updated successfully.",
@@ -316,6 +446,4 @@ router.post("/submit-test", verifyLogin, async (req, res) => {
     });
   }
 });
-
-
 module.exports = router;

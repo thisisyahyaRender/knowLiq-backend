@@ -15,6 +15,7 @@ const subtopicSchema = new mongoose.Schema({
     enum: ['red', 'yellow', 'green', 'untested'],
     default: 'untested' 
   },
+  remarks : {type : String, default : ""},
   last_learned_at: { 
     type: Date, 
     default: null 
