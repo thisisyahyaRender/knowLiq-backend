@@ -13,7 +13,6 @@ const openai = new OpenAI({
 });
 
 
-
 // --- Cost Calculation Helper ---
 const MODEL_PRICING = {
   "gpt-4o-mini": { inputRate: 0.15, outputRate: 0.60 },
@@ -40,23 +39,95 @@ function logTokenUsageAndCost(modelName, completionObj, contextLabel) {
   console.log(`in /chat [${contextLabel}] : -----------------------------------`);
 }
 
+// 2. Your new Groq Client (isolated with its own API Key and Server URL)
+const groq = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: "https://api.groq.com/openai/v1", // <-- required
+});
+
+
+
+
+// Ensure Groq is initialized at the top of your file
+// const { OpenAI } = require("openai");
+// const groq = new OpenAI({ apiKey: process.env.GROQ_API_KEY, baseURL: "https://api.groq.com/openai/v1" });
+
+async function rollingSummary(workspace, openAiMessages) {
+  try {
+    // 1. Defensively initialize the summary object if it doesn't exist
+    if (!workspace.currentFocusSummary) {
+      workspace.currentFocusSummary = { text: "", counter: 0 };
+    }
+
+    // 2. Since openAiMessages is ALWAYS the last 3 messages, just filter the system prompt
+    const conversationHistory = openAiMessages
+      .filter(msg => msg.role !== "system")
+      .map(msg => `${msg.role === "user" ? "Student" : "Tutor"}: ${msg.content}`)
+      .join("\n\n");
+
+    // 3. System prompt for dense, single-paragraph compression
+    const summarizerSystemPrompt = `You are an expert educational tracking system. Your task is to maintain an ULTRA-CONCISE, running ledger of topics the student has covered.
+
+CRITICAL RULES:
+1. EXTREME ABSTRACTION: Do NOT explain or define the concepts. Abstract granular details into high-level category names. (e.g., instead of "Apperception theory explains how new information is integrated...", output "Apperception theory & integration").
+2. STRICT LENGTH LIMIT: The entire summary MUST NEVER exceed 40 words, no matter how many chats have occurred.
+3. PRUNE & MERGE: Seamlessly group new topics from the Recent Conversation into the Previous Summary. Merge related ideas and boldly delete outdated nuances to stay under the word limit.
+4. FORMAT: Output a maximum of 2 to 3 short sentences. Start directly with the concepts. No introductory fluff.`;
+
+    const summarizerUserPrompt = `PREVIOUS SUMMARY:
+${workspace.currentFocusSummary.text || "No previous topics recorded."}
+
+RECENT CONVERSATION:
+${conversationHistory}`;
+
+    // 4. API Call
+    const response = await groq.chat.completions.create({
+      model: "openai/gpt-oss-20b",
+      messages: [
+        { role: "system", content: summarizerSystemPrompt },
+        { role: "user", content: summarizerUserPrompt }
+      ],
+      temperature: 0.2, // Low temp for structured, non-hallucinated compression
+    });
+
+    // 5. Update the text on the user object
+    workspace.currentFocusSummary.text = response.choices[0].message.content.trim();
+
+    // Note: Do NOT increment user.currentFocusSummary.counter here. 
+    // That should be done in your main chat route to accurately track total turns!
+
+    // --- USAGE & COST TRACKING ---
+    const { prompt_tokens, completion_tokens, total_tokens } = response.usage;
+
+    // Groq openai/gpt-oss-20b Pricing (per 1 Million tokens)
+    const COST_PER_1M_INPUT = 0.075;
+    const COST_PER_1M_OUTPUT = 0.30;
+
+    const inputCost = (prompt_tokens / 1000000) * COST_PER_1M_INPUT;
+    const outputCost = (completion_tokens / 1000000) * COST_PER_1M_OUTPUT;
+    const totalCost = inputCost + outputCost;
+
+    // 6. Log results
+    console.log("\n--- Rolling Summary Updated ---");
+    console.log(workspace.currentFocusSummary.text);
+
+    console.log("\n--- Usage & Cost Report ---");
+    console.log(`Input Tokens: ${prompt_tokens} | Output Tokens: ${completion_tokens} | Total: ${total_tokens}`);
+    console.log(`Estimated Cost: $${totalCost.toFixed(6)}`);
+
+  } catch (error) {
+    console.error("Error generating rolling summary:", error);
+  }
+}
+
+
+
 router.post("/chat", verifyLogin, async (req, res) => {
   try {
     console.log("in /chat : route hit, starting hybrid RAG chat processing...");
 
     const { uid } = req;
     const { selectedModel, subject, query } = req.body;
-
-    // // Normalize incoming current-topics from session/frontend
-    // let currentTopics = req.body["current-topics"] || req.body.currentTopics || [];
-    // if (typeof currentTopics === "string") {
-    //   try {
-    //     currentTopics = JSON.parse(currentTopics);
-    //   } catch (e) {
-    //     currentTopics = [];
-    //   }
-    // }
-
 
 
     // 1. Model mapping dictionary
@@ -89,34 +160,33 @@ router.post("/chat", verifyLogin, async (req, res) => {
     if (!user) return res.status(400).json({ success: "false", error: "User does not exist." });
 
 
-
     // 4. Fetch Workspace
     const workspace = await Workspace.findOne({ owner: user._id, subject: subject.trim() });
     if (!workspace) return res.status(404).json({ success: "false", error: "Workspace not found." });
 
     const topicNamesList = workspace.detailedTopics.map(t => t.topic).join(", ");
 
-    let currentTopics = user.currentTopics || [];
+    let currentFocus = workspace.currentFocus || [];
 
-    if (user.test_pending) {
+    if (workspace.test_pending) {
       return res.status(403).json({
         success: "false",
         // Add the markdown link here as well!
         answer: `**Take Test Now, The chat is freezed till then.**\n\n[👉 Click here to start the test](/takeTest?subject=${encodeURIComponent(subject.trim())})`,
-        "current-topics": currentTopics,
+        "current-topics": currentFocus,
         test_pending: true,
         chat_locked: user.chatLock || false
       });
     }
 
     // Log the received topics
-    console.log(`in /chat : Received current-topics from memory :`, JSON.stringify(currentTopics));
+    console.log(`in /chat : Received current-Focus from memory :`, JSON.stringify(currentFocus));
 
     // 5. FIRST-TIME SESSION CHECK: Pick initial subtopics using gpt-4o-mini
-    if (!Array.isArray(currentTopics) || currentTopics.length === 0) {
+    if (!Array.isArray(currentFocus) || currentFocus.length === 0) {
       console.log("in /chat : Initializing new session topics via gpt-4o-mini...");
 
-      const currentDateISO = new Date().toISOString();
+      //const currentDateISO = new Date().toISOString();
       // 1. Calculate overdue intervals in JavaScript (100% reliable)
       const now = new Date();
       const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -211,11 +281,12 @@ CRITICAL: Return ONLY exact subtopic names present in the provided list.`
       console.log("in /chat : Topics selected:", pickerData.selected_subtopics, "| Rationale:", pickerData.selection_rationale);
 
       // To this:
-      currentTopics = pickerData.selected_subtopics.map(name => ({
+      currentFocus = pickerData.selected_subtopics.map(name => ({
         topic: name, // ✅ CORRECT (Matches your Mongoose schema)
         counter: 0
       }));
     }
+
 
     // 6. Generate Embedding for User Query
     console.log("in /chat : generating embeddings for user query...");
@@ -256,31 +327,82 @@ CRITICAL: Return ONLY exact subtopic names present in the provided list.`
 
     // 8. Prepare Active State String
     // When preparing prompt string:
-    const activeSessionTopicsString = currentTopics
+    const activeSessionTopicsString = currentFocus
       .map(t => `${t.topic} (Turns spent: ${t.counter})`)
       .join(", ");
 
 
+    // Inject the rolling summary here
+    const rollingSummaryText = workspace.currentFocusSummary?.text || "No concepts taught recently.";
 
 
+    // --- DYNAMIC USER SETTINGS EXTRACTION ---
+    const learnerType = user.settings?.learnerType || "visual";
+    const answerStructure = user.settings?.answerStructure || "normal";
+    const preferredLang = user.settings?.preferredLanguage || "English";
+
+    // 1. Determine Learning Style Instruction
+    let learningStyleInstruction = "";
+
+    if (learnerType === "visual") {
+      learningStyleInstruction = `**LEARNING STYLE: VISUAL & ANALOGY MODE**
+You are a visual-concept tutor. When explaining an abstract, difficult, or invisible concept, first make it mentally tangible by connecting it to a simple, concrete representation, intuitive analogy, spatial relationship, process, or familiar real-world mechanism when this genuinely improves understanding.
+
+The analogy must be selected dynamically based on the concept being taught. Do not repeatedly use the same analogy, domain, object, or scenario. Do not force an analogy when the technical concept is already intuitive or when an analogy would introduce unnecessary complexity.
+
+After establishing intuition, connect the analogy explicitly back to the actual technical concept, terminology, mechanism, and rules. The analogy is a temporary mental model, not a replacement for the technically accurate explanation.
+
+Prioritize conceptual clarity over decorative examples. Use diagrams, spatial descriptions, step-by-step mental visualization, or cause-and-effect relationships when they are more appropriate than an analogy.`;
+
+    } else if (learnerType === "socratic") {
+      learningStyleInstruction = `**LEARNING STYLE: INTERACTIVE SOCRATIC MODE**
+You are an Interactive Socratic Tutor. Guide the learner toward understanding through carefully selected conceptual questions rather than immediately providing the complete answer.
+
+Keep explanations concise and reveal information progressively. Ask only one meaningful question at a time, and make each question directly relevant to the learner's current level of understanding.
+
+End every response with exactly one targeted conceptual question based on what was just discussed. Wait for the user's answer before progressing further.`;
+
+    } else if (learnerType === "concise") {
+      learningStyleInstruction = `**LEARNING STYLE: TO-THE-POINT MODE**
+You are a Strict, Concise Technical Tutor. Eliminate conversational filler and unnecessary explanation.
+
+Present only the information required to understand the current concept. Prefer short statements, bullet points, and precise terminology over long paragraphs. Use bolding selectively for important terms.
+
+Keep the entire response strictly under 150 words unless additional detail is absolutely necessary to prevent misunderstanding.`;
+    }
+
+    // 2. Determine Structure Instruction
+    const structureInstruction = answerStructure === "detailed"
+      ? "Provide comprehensive, detailed, and in-depth breakdowns."
+      : "Keep explanations normal and efficient. Do not over-explain. (Cost-saving mode).";
+
+
+    // --- DYNAMIC SYSTEM PROMPT ---
     const systemPrompt = `You are an elite, interactive AI tutor. Your directive is to keep the student perfectly focused using bite-sized learning and active recall.
+
+### USER PROFILE & PREFERENCES
+${learningStyleInstruction}
+- **ANSWER STRUCTURE**: ${structureInstruction}
+- **COMMUNICATION LANGUAGE**: Match the user's language, but your primary language is ${preferredLang}. If the language is Urdu, write exclusively in **Roman Urdu** (Urdu using the Latin/English alphabet). **Do not use Hindi** under any circumstances.
 
 ### CURRENT SESSION CONTEXT
 You are currently focusing ONLY on these subtopics with the user:
 [ ${activeSessionTopicsString} ]
 
+### RECENTLY COVERED CONCEPTS (Avoid repeating these):
+${rollingSummaryText}
+
 ### RELEVANT PAST KNOWLEDGE (From previous chats):
 ${longTermContext}
 
 ### CORE TUTORING RULES:
-1. NO INFO-DUMPING: Never explain everything at once. Focus on ONLY ONE concept at a time. Keep explanations concise and easy to digest.
-2. QUESTIONING & TRANSITIONS: Do NOT ask obvious, trivial, or forced questions. Only ask a question if the concept is complex and genuinely requires active recall. Always end your response with a clear guiding statement to smoothly transition the user to the next logical subtopic from your CURRENT SESSION CONTEXT list.
+1. NO INFO-DUMPING: Never explain everything at once. Focus on ONLY ONE concept at a time.
+2. QUESTIONING & TRANSITIONS: Do NOT ask obvious or forced questions (unless in Socratic mode). Always end your response with a clear guiding statement to smoothly transition the user to the next logical subtopic from your CURRENT SESSION CONTEXT list.
 3. ADAPTABILITY: If they are confused, re-explain simply. If they master it, transition to the next logical concept.
-4. FORMATTING: Use standard LaTeX for math ($$ for display, $ for inline). Keep general text formatting light. Use headings and subheadings. If a response contains multiple concepts or detailed comparisons, you must summarize them in a Markdown Table at the end.
-5. LANGUAGE: Match the user's language. If they use Urdu or Roman Urdu, reply in that language. Do not use Hindi.
+4. FORMATTING: Use standard LaTeX for math ($$ for display, $ for inline). Keep general text formatting light. Use headings and subheadings. If a response contains multiple concepts, summarize them in a Markdown Table at the end.
 
 ### ROUTING & FLAG RULES:
-- test_pending: Look at the "Turns spent" in the CURRENT SESSION CONTEXT. If ANY topic has reached 7 or more turns, you MUST immediately set "test_pending": true. DO NOT ask the user if they want to take a test. DO NOT wait for their permission or agreement. Enforce the test automatically.
+- test_pending: Look at the "Turns spent" in the CURRENT SESSION CONTEXT. If ANY topic has reached 7 or more turns, you MUST immediately set "test_pending": true. DO NOT ask the user if they want to take a test. Enforce the test automatically.
 - requires_global_context: If the user asks a meta-question about their overall progress, syllabus status, or historical review dates, set "requires_global_context": true.
 - OFF-TOPIC HANDLING: If the user asks something entirely unrelated to the syllabus, set "tutor_response" to gently guide them back using this list of available topics: ${topicNamesList}.`;
 
@@ -347,6 +469,23 @@ ${longTermContext}
     let aiData = JSON.parse(completion.choices[0].message.content);
     let finalAnswer = aiData.tutor_response;
 
+
+
+    // 11.5    
+    // Defensively ensure the object exists to avoid "Cannot read properties of undefined"
+    if (!workspace.currentFocusSummary) {
+      workspace.currentFocusSummary = { text: "", counter: 0 };
+    }
+
+    workspace.currentFocusSummary.counter += 1;
+
+    if (workspace.currentFocusSummary.counter % 3 === 0) {
+      await rollingSummary(workspace, openAiMessages);
+    }
+    else {
+      console.log("chats so far : ", workspace.currentFocusSummary.counter);
+    }
+
     // 12. GLOBAL CONTEXT FALLBACK (Meta-Counselor Routing)
     if (aiData.requires_global_context) {
       console.log("in /chat : Meta inquiry detected. Routing to gpt-4o-mini with full syllabus...");
@@ -396,17 +535,17 @@ ${currentDateISO}
     if (aiData.current_taught_subtopic) {
       const taughtName = aiData.current_taught_subtopic.trim();
 
-      const matchedIndex = currentTopics.findIndex(
+      const matchedIndex = currentFocus.findIndex(
         t => t.topic && t.topic.trim().toLowerCase() === taughtName.toLowerCase()
       );
 
       if (matchedIndex !== -1) {
-        currentTopics[matchedIndex].counter = (currentTopics[matchedIndex].counter || 0) + 1;
+        currentFocus[matchedIndex].counter = (currentFocus[matchedIndex].counter || 0) + 1;
 
         await Workspace.updateOne(
           {
             _id: workspace._id,
-            "detailedTopics.subtopics.name": currentTopics[matchedIndex].topic
+            "detailedTopics.subtopics.name": currentFocus[matchedIndex].topic
           },
           {
             $set: {
@@ -415,7 +554,7 @@ ${currentDateISO}
           },
           {
             arrayFilters: [
-              { "sub.name": currentTopics[matchedIndex].topic }
+              { "sub.name": currentFocus[matchedIndex].topic }
             ]
           }
         );
@@ -431,15 +570,17 @@ ${currentDateISO}
 
       if (isTestPending) {
         console.log("in /chat : test_pending flag is true. Locking user chat...");
-        user.test_pending = true;
-        finalAnswer = "Take test now, till then, the chat is freezed.";
+        workspace.test_pending = true;
+        finalAnswer =`**Take Test Now, The chat is freezed till then.**\n\n[👉 Click here to start the test](/takeTest?subject=${encodeURIComponent(subject.trim())})`;
       }
 
       // Sync the mutated in-memory array to the user document
-      user.currentTopics = currentTopics || [];
-      user.markModified("currentTopics");
+      workspace.currentFocus = currentFocus || [];
+      workspace.markModified("currentFocus");
+      workspace.markModified("currentFocusSummary"); // <--- ADD THIS LINE
 
       // One single save for both the chat lock and the current topics
+      await workspace.save();
       await user.save();
 
     } catch (saveError) {
@@ -466,7 +607,7 @@ ${currentDateISO}
     return res.status(200).json({
       success: "true",
       answer: finalAnswer,
-      "current-topics": currentTopics,
+      "current-topics": currentFocus,
       test_pending: isTestPending,
       chat_locked: user.chatLock || false
     });
@@ -717,7 +858,13 @@ router.get("/fetch-chat", verifyLogin, async (req, res) => {
       return res.status(400).json({ success: "false", error: "User does not exist" });
     }
 
-    const isTestPending = user.test_pending || false;
+    // 👇 FIX: Fetch the workspace before accessing it!
+    const workspace = await Workspace.findOne({ 
+      owner: user._id, 
+      subject: subject.trim() 
+    });
+
+    const isTestPending = workspace.test_pending || false;
 
     // Find chats for this user and subject, sorted from oldest to newest
     const chats = await Chat.find({

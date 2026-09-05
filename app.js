@@ -70,7 +70,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // --- 5. STANDARD ROUTES ---
 app.use('/', indexRouter);
 app.use('/users', usersRouter);
-app.use('/auth', require("./routes/auth"));
+// app.use('/auth', require("./routes/auth"));
 app.use('/test', require("./routes/testRouter"));
 app.use('/chat', chatRouter);
 

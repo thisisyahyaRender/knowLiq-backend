@@ -1,13 +1,17 @@
 const mongoose = require('mongoose');
 
-const currentTopicSchema = new mongoose.Schema(
+
+
+// New Settings Schema to keep the main user object clean
+const userSettingsSchema = new mongoose.Schema(
   {
-    topic: { type: String, required: true, trim: true },
-    counter: { type: Number, default: 0 },
- started_at : {type : Date, default : Date.now},
+    learnerType: { type: String, default: 'visual' },
+    preferredLanguage: { type: String, default: 'English' },
+    fieldOfStudy: { type: String, default: 'technical' },
+    answerStructure: { type: String, default: 'normal' },
+    theme: { type: String, default: 'dark' }
   },
-  
-  { _id: false } // Correctly disables auto-generated _id
+  { _id: false }
 );
 
 const userSchema = new mongoose.Schema({
@@ -28,14 +32,15 @@ const userSchema = new mongoose.Schema({
     type: String 
   },
   workspaces: [{
-  type: String,
-  trim: true
-}],
-
-currentTopics: [currentTopicSchema],
-
-test_pending : {type : Boolean, default : false},
-
+    type: String,
+    trim: true
+  }],
+  
+  // Embed the settings schema, and initialize it automatically for new users
+  settings: { 
+    type: userSettingsSchema, 
+    default: () => ({}) 
+  }
 }, { 
   timestamps: true // Automatically adds createdAt and updatedAt dates
 });
